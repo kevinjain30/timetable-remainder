@@ -1,518 +1,964 @@
 /**
- * Timetable Reminder App
- *
- * This React Native application allows users to create and manage multiple
- * timetable lists (categories). For each list, users can add, edit, and
- * remove tasks, and schedule repeating daily notifications. Data is saved
- * to the device's local storage.
- *
- * @format
+ * Todoist-Style Task Manager for React Native
+ * Features: Projects, Dark Mode, Notifications, Swipe Gestures
+ * Works on both Android and iOS
  */
-import React, {useState, useEffect} from 'react';
+import React, { useState, useEffect } from 'react';
 import {
-  SafeAreaView,
   View,
   Text,
+  ScrollView,
+  TouchableOpacity,
+  TextInput,
+  Modal,
+  SafeAreaView,
+  StyleSheet,
+  Alert,
   FlatList,
   StatusBar,
-  StyleSheet,
-  TouchableOpacity,
-  Alert,
-  ListRenderItem,
-  Modal,
-  TextInput,
+  Platform,
+  Dimensions,
+  useColorScheme, // For Dark Mode
 } from 'react-native';
-import notifee, {
-  TimestampTrigger,
-  TriggerType,
-  RepeatFrequency,
-} from '@notifee/react-native';
 import AsyncStorage from '@react-native-async-storage/async-storage';
+import { v4 as uuidv4 } from 'uuid';
 import 'react-native-get-random-values';
-import {v4 as uuidv4} from 'uuid';
+import {
+  GestureHandlerRootView,
+  Swipeable,
+} from 'react-native-gesture-handler'; // For Swipe Gestures
+import notifee, { TriggerType } from '@notifee/react-native'; // For Notifications
+
+const { width, height } = Dimensions.get('window');
+
+// --- Constants ---
+const COLORS = {
+  primary: '#dc2626', // Red (Todoist-like)
+};
+const STORAGE_KEY = '@todoist_tasks_v2';
 
 // --- Type Definitions ---
-interface TimetableItem {
+interface Task {
   id: string;
-  time: string; // Stored in 24-hour format (e.g., "14:30")
-  task: string;
+  title: string;
+  description?: string;
+  completed: boolean;
+  priority: 'low' | 'medium' | 'high';
+  dueDate?: string;
+  dueTime?: string;
+  project: string;
+  tags: string[];
+  createdAt: string;
+  completedAt?: string;
+  // New timetable-specific fields
+  isRecurring?: boolean;
+  recurringDays?: string[]; // ['monday', 'tuesday', ...]
+  isTimeTableItem?: boolean;
+  category?: 'timetable' | 'todo' | 'project';
 }
 
-interface TimetableList {
+interface Project {
   id: string;
   name: string;
-  tasks: TimetableItem[];
+  color: string;
+  taskCount: number;
 }
 
-// --- Initial Data (only used if no saved data exists) ---
-const INITIAL_DATA: TimetableList[] = [
-  {
-    id: uuidv4(),
-    name: 'Default Timetable',
-    tasks: [
-      {id: '1', time: '06:00', task: 'Wake up'},
-      {id: '2', time: '06:15', task: 'Go to walk'},
-      {id: '3', time: '10:00', task: 'Go to College'},
-      {id: '4', time: '19:30', task: 'Fresh up and have dinner'},
-      {id: '5', time: '20:30', task: 'Study new topics'},
-    ],
-  },
-];
-
-const STORAGE_KEY = '@timetable_lists_v2';
+// Type for the new task form state
+type NewTaskState = {
+  title: string;
+  description: string;
+  priority: 'low' | 'medium' | 'high';
+  dueDate: string;
+  dueTime: string;
+  project: string;
+  tags: string[];
+};
 
 // --- Main App Component ---
-const App = () => {
-  const [lists, setLists] = useState<TimetableList[]>([]);
-  const [activeListId, setActiveListId] = useState<string | null>(null);
-  const [taskModalVisible, setTaskModalVisible] = useState(false);
-  const [listModalVisible, setListModalVisible] = useState(false);
-  const [isEditingTask, setIsEditingTask] = useState<TimetableItem | null>(null);
-  const [currentTime, setCurrentTime] = useState('');
-  const [currentTask, setCurrentTask] = useState('');
-  const [newListName, setNewListName] = useState('');
+const TaskManager = () => {
+  // --- State Management ---
+  const colorScheme = useColorScheme();
+  const isDark = colorScheme === 'dark';
 
-  // --- Data Loading and Saving ---
+  const [tasks, setTasks] = useState<Task[]>([]);
+  const [projects] = useState<Project[]>([
+    { id: 'inbox', name: 'Inbox', color: '#3b82f6', taskCount: 0 },
+    { id: 'work', name: 'Work', color: '#ef4444', taskCount: 0 },
+    { id: 'personal', name: 'Personal', color: '#22c55e', taskCount: 0 },
+    { id: 'health', name: 'Health & Fitness', color: '#f59e0b', taskCount: 0 },
+  ]);
+
+  const [activeProject, setActiveProject] = useState('inbox');
+  const [showAddTask, setShowAddTask] = useState(false);
+  const [showSidebar, setShowSidebar] = useState(false);
+  const [searchQuery, setSearchQuery] = useState('');
+  const [filterCompleted, setFilterCompleted] = useState(false);
+
+  const [newTask, setNewTask] = useState<NewTaskState>({
+    title: '',
+    description: '',
+    priority: 'medium',
+    dueDate: '',
+    dueTime: '',
+    project: 'inbox',
+    tags: [],
+  });
+
+  // --- Dynamic Styles for Dark Mode ---
+  const dynamicStyles = {
+    container: {
+      backgroundColor: isDark ? '#111827' : '#f9fafb',
+    },
+    header: {
+      backgroundColor: COLORS.primary,
+    },
+    headerTitle: {
+      color: '#ffffff',
+    },
+    card: {
+      backgroundColor: isDark ? '#1f2937' : '#ffffff',
+    },
+    text: {
+      color: isDark ? '#f9fafb' : '#111827',
+    },
+    subtleText: {
+      color: isDark ? '#9ca3af' : '#6b7280',
+    },
+    borderColor: {
+      borderColor: isDark ? '#374151' : '#e5e7eb',
+    },
+    input: {
+      backgroundColor: isDark ? '#374151' : '#f9fafb',
+      color: isDark ? '#f9fafb' : '#111827',
+      borderColor: isDark ? '#4b5563' : '#e5e7eb',
+    },
+    modal: {
+      backgroundColor: isDark ? '#1f2937' : '#ffffff',
+    },
+  };
+
+  // --- Data Persistence ---
   useEffect(() => {
-    const loadData = async () => {
-      try {
-        const storedData = await AsyncStorage.getItem(STORAGE_KEY);
-        if (storedData !== null) {
-          const parsedLists: TimetableList[] = JSON.parse(storedData);
-          setLists(parsedLists);
-          // Set the first list as active if one exists
-          if (parsedLists.length > 0) {
-            setActiveListId(parsedLists[0].id);
-          }
-        } else {
-          setLists(INITIAL_DATA);
-          setActiveListId(INITIAL_DATA[0].id);
-        }
-      } catch (e) {
-        console.error('Failed to load data.', e);
-        setLists(INITIAL_DATA);
-      }
-    };
-    loadData();
+    loadTasks();
+    // Create a notification channel on app start
+    notifee.createChannel({
+      id: 'task-reminders',
+      name: 'Task Reminders',
+    });
   }, []);
 
-  const saveData = async (newLists: TimetableList[]) => {
+  const loadTasks = async () => {
     try {
-      setLists(newLists);
-      const jsonValue = JSON.stringify(newLists);
-      await AsyncStorage.setItem(STORAGE_KEY, jsonValue);
-    } catch (e) {
-      console.error('Failed to save data.', e);
+      const storedTasks = await AsyncStorage.getItem(STORAGE_KEY);
+      if (storedTasks) {
+        setTasks(JSON.parse(storedTasks));
+      }
+    } catch (error) {
+      console.error('Error loading tasks:', error);
     }
   };
+
+  const saveTasks = async (updatedTasks: Task[]) => {
+    try {
+      await AsyncStorage.setItem(STORAGE_KEY, JSON.stringify(updatedTasks));
+      setTasks(updatedTasks);
+    } catch (error) {
+      console.error('Error saving tasks:', error);
+    }
+  };
+
+  // --- Notification Logic ---
+  const scheduleTaskNotification = async (task: Task) => {
+    if (task.dueDate && task.dueTime) {
+      try {
+        const [hours, minutes] = task.dueTime.split(':');
+        const dueDateTime = new Date(task.dueDate);
+        dueDateTime.setHours(parseInt(hours), parseInt(minutes), 0, 0);
+
+        // Schedule only if the date is in the future
+        if (dueDateTime.getTime() > Date.now()) {
+          await notifee.createTriggerNotification(
+            {
+              id: task.id,
+              title: 'Task Reminder',
+              body: task.title,
+              android: { channelId: 'task-reminders' },
+            },
+            {
+              type: TriggerType.TIMESTAMP,
+              timestamp: dueDateTime.getTime(),
+            },
+          );
+        }
+      } catch (e) {
+        console.error('Failed to schedule notification:', e);
+      }
+    }
+  };
+
+  // --- Task Filtering and Sorting ---
+  const filteredTasks = tasks.filter(task => {
+    const matchesProject =
+      activeProject === 'inbox' || task.project === activeProject;
+    const matchesSearch =
+      task.title.toLowerCase().includes(searchQuery.toLowerCase()) ||
+      task.description?.toLowerCase().includes(searchQuery.toLowerCase());
+    const matchesCompleted = !filterCompleted || !task.completed;
+    return matchesProject && matchesSearch && matchesCompleted;
+  });
+
+  const completedTasks = filteredTasks.filter(task => task.completed);
+  const pendingTasks = filteredTasks.filter(task => !task.completed);
 
   // --- Helper Functions ---
-  const formatTime12Hour = (time24: string) => {
-    if (!time24 || !time24.includes(':')) return 'Invalid Time';
-    const [hour, minute] = time24.split(':').map(Number);
-    const ampm = hour >= 12 ? 'PM' : 'AM';
-    const hour12 = hour % 12 || 12;
-    return `${String(hour12).padStart(2, '0')}:${String(minute).padStart(
-      2,
-      '0',
-    )} ${ampm}`;
+  const formatDate = (dateString: string) => {
+    const date = new Date(dateString);
+    const today = new Date();
+    const tomorrow = new Date(today);
+    tomorrow.setDate(tomorrow.getDate() + 1);
+    if (date.toDateString() === today.toDateString()) return 'Today';
+    if (date.toDateString() === tomorrow.toDateString()) return 'Tomorrow';
+    return date.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
   };
 
-  const getActiveList = () => lists.find(l => l.id === activeListId);
+  const getPriorityColor = (priority: string) => {
+    switch (priority) {
+      case 'high':
+        return '#ef4444';
+      case 'medium':
+        return '#f59e0b';
+      case 'low':
+        return '#3b82f6';
+      default:
+        return '#6b7280';
+    }
+  };
 
-  // --- List Management Handlers ---
-  const handleAddList = () => {
-    if (!newListName.trim()) {
-      Alert.alert('Invalid Name', 'List name cannot be empty.');
+  const getProjectColor = (projectId: string) => {
+    return projects.find(p => p.id === projectId)?.color || '#6b7280';
+  };
+
+  // --- Task Actions ---
+  const toggleTask = (taskId: string) => {
+    const updatedTasks = tasks.map(task =>
+      task.id === taskId
+        ? {
+            ...task,
+            completed: !task.completed,
+            completedAt: !task.completed ? new Date().toISOString() : undefined,
+          }
+        : task,
+    );
+    saveTasks(updatedTasks);
+  };
+
+  const addTask = () => {
+    if (!newTask.title.trim()) {
+      Alert.alert('Error', 'Task title is required');
       return;
     }
-    const newList: TimetableList = {
+    const task: Task = {
       id: uuidv4(),
-      name: newListName.trim(),
-      tasks: [],
+      title: newTask.title,
+      description: newTask.description || undefined,
+      completed: false,
+      priority: newTask.priority,
+      dueDate: newTask.dueDate || undefined,
+      dueTime: newTask.dueTime || undefined,
+      project: newTask.project,
+      tags: newTask.tags,
+      createdAt: new Date().toISOString(),
     };
-    const updatedLists = [...lists, newList];
-    saveData(updatedLists);
-    setActiveListId(newList.id);
-    setNewListName('');
-    setListModalVisible(false);
+    const updatedTasks = [...tasks, task];
+    saveTasks(updatedTasks);
+    scheduleTaskNotification(task); // Schedule notification for new task
+    resetNewTask();
+    setShowAddTask(false);
   };
 
-  const handleDeleteList = (listId: string) => {
-    Alert.alert(
-      'Delete List',
-      'Are you sure you want to delete this entire list and all its tasks?',
-      [
-        {text: 'Cancel', style: 'cancel'},
-        {
-          text: 'Delete',
-          onPress: () => {
-            const updatedLists = lists.filter(l => l.id !== listId);
-            saveData(updatedLists);
-            // If the deleted list was active, switch to another one or set to null
-            if (activeListId === listId) {
-              setActiveListId(updatedLists.length > 0 ? updatedLists[0].id : null);
-            }
-          },
-          style: 'destructive',
+  const deleteTask = (taskId: string) => {
+    Alert.alert('Delete Task', 'Are you sure you want to delete this task?', [
+      { text: 'Cancel', style: 'cancel' },
+      {
+        text: 'Delete',
+        style: 'destructive',
+        onPress: () => {
+          const updatedTasks = tasks.filter(task => task.id !== taskId);
+          saveTasks(updatedTasks);
+          notifee.cancelNotification(taskId); // Cancel notification on delete
         },
-      ],
-    );
+      },
+    ]);
   };
 
-  // --- Task Management Handlers ---
-  const handleAddTask = () => {
-    setIsEditingTask(null);
-    setCurrentTime('');
-    setCurrentTask('');
-    setTaskModalVisible(true);
+  const resetNewTask = () => {
+    setNewTask({
+      title: '',
+      description: '',
+      priority: 'medium',
+      dueDate: '',
+      dueTime: '',
+      project: activeProject,
+      tags: [],
+    });
   };
 
-  const handleEditTask = (task: TimetableItem) => {
-    setIsEditingTask(task);
-    setCurrentTime(task.time);
-    setCurrentTask(task.task);
-    setTaskModalVisible(true);
-  };
-
-  const handleSaveTask = () => {
-    if (!currentTask || !/^\d{2}:\d{2}$/.test(currentTime)) {
-      Alert.alert('Invalid Input', 'Please enter a task and time in HH:MM format.');
-      return;
-    }
-
-    const activeList = getActiveList();
-    if (!activeList) return;
-
-    let updatedTasks;
-    if (isEditingTask) {
-      updatedTasks = activeList.tasks.map(task =>
-        task.id === isEditingTask.id
-          ? {...task, time: currentTime, task: currentTask}
-          : task,
-      );
-    } else {
-      const newTask: TimetableItem = {
-        id: uuidv4(),
-        time: currentTime,
-        task: currentTask,
-      };
-      updatedTasks = [...activeList.tasks, newTask];
-    }
-
-    // Sort tasks by time
-    updatedTasks.sort((a, b) => a.time.localeCompare(b.time));
-
-    const updatedLists = lists.map(list =>
-      list.id === activeListId ? {...list, tasks: updatedTasks} : list,
-    );
-    saveData(updatedLists);
-    setTaskModalVisible(false);
-  };
-
-  const handleDeleteTask = (taskId: string) => {
-    const activeList = getActiveList();
-    if (!activeList) return;
-
-    const updatedTasks = activeList.tasks.filter(task => task.id !== taskId);
-    const updatedLists = lists.map(list =>
-      list.id === activeListId ? {...list, tasks: updatedTasks} : list,
-    );
-    saveData(updatedLists);
-  };
-
-  // --- Notification Handler ---
-  const scheduleAllNotifications = async () => {
-    const activeList = getActiveList();
-    if (!activeList || activeList.tasks.length === 0) {
-      Alert.alert('No Tasks', 'There are no tasks in the current list to schedule.');
-      return;
-    }
-
-    try {
-      await notifee.requestPermission();
-      const channelId = await notifee.createChannel({
-        id: 'timetable-reminders',
-        name: 'Timetable Reminders',
-      });
-      await notifee.cancelAllNotifications();
-
-      for (const item of activeList.tasks) {
-        const [hour, minute] = item.time.split(':').map(Number);
-        const triggerDate = new Date();
-        triggerDate.setHours(hour, minute, 0, 0);
-        if (triggerDate.getTime() < Date.now()) {
-          triggerDate.setDate(triggerDate.getDate() + 1);
-        }
-        const trigger: TimestampTrigger = {
-          type: TriggerType.TIMESTAMP,
-          timestamp: triggerDate.getTime(),
-          repeatFrequency: RepeatFrequency.DAILY,
-        };
-        await notifee.createTriggerNotification(
-          {
-            id: item.id,
-            title: `Time for: ${item.task}`,
-            body: `It's ${formatTime12Hour(item.time)}. From your '${
-              activeList.name
-            }' list.`,
-            android: {channelId, pressAction: {id: 'default'}},
-          },
-          trigger,
-        );
-      }
-      Alert.alert(
-        'Notifications Scheduled!',
-        `Reminders for "${activeList.name}" have been set up.`,
-      );
-    } catch (error) {
-      console.error('Error scheduling notifications:', error);
-    }
-  };
-
-  // --- Render Functions ---
-  const renderTaskItem: ListRenderItem<TimetableItem> = ({item}) => (
-    <View style={styles.itemContainer}>
-      <View style={styles.timeContainer}>
-        <Text style={styles.timeText}>{formatTime12Hour(item.time)}</Text>
-      </View>
-      <View style={styles.taskContainer}>
-        <Text style={styles.taskText}>{item.task}</Text>
-      </View>
-      <View style={styles.itemActions}>
-        <TouchableOpacity onPress={() => handleEditTask(item)}>
-          <Text style={styles.actionText}>Edit</Text>
-        </TouchableOpacity>
-        <TouchableOpacity onPress={() => handleDeleteTask(item.id)}>
-          <Text style={[styles.actionText, styles.deleteText]}>Remove</Text>
-        </TouchableOpacity>
-      </View>
-    </View>
+  // --- Render Components ---
+  const renderRightActions = (task: Task) => (
+    <TouchableOpacity
+      style={styles.swipeAction}
+      onPress={() => toggleTask(task.id)}
+    >
+      <Text style={styles.swipeActionText}>
+        {task.completed ? 'Undo' : 'Complete'}
+      </Text>
+    </TouchableOpacity>
   );
 
-  const activeList = getActiveList();
-
-  return (
-    <SafeAreaView style={styles.container}>
-      <StatusBar barStyle="light-content" backgroundColor="#1a202c" />
-
-      {/* Modal for Adding/Editing Tasks */}
-      <Modal
-        animationType="slide"
-        transparent={true}
-        visible={taskModalVisible}
-        onRequestClose={() => setTaskModalVisible(false)}>
-        <View style={styles.modalContainer}>
-          <View style={styles.modalView}>
-            <Text style={styles.modalTitle}>
-              {isEditingTask ? 'Edit Task' : 'Add New Task'}
-            </Text>
-            <TextInput
-              style={styles.input}
-              placeholder="Task Description"
-              placeholderTextColor="#999"
-              value={currentTask}
-              onChangeText={setCurrentTask}
-            />
-            <TextInput
-              style={styles.input}
-              placeholder="Time (HH:MM, 24-hour format)"
-              placeholderTextColor="#999"
-              value={currentTime}
-              onChangeText={setCurrentTime}
-              keyboardType="numeric"
-              maxLength={5}
-            />
-            <View style={styles.modalButtons}>
-              <TouchableOpacity
-                style={[styles.button, styles.cancelButton]}
-                onPress={() => setTaskModalVisible(false)}>
-                <Text style={styles.buttonText}>Cancel</Text>
-              </TouchableOpacity>
-              <TouchableOpacity
-                style={[styles.button, styles.scheduleButton]}
-                onPress={handleSaveTask}>
-                <Text style={styles.buttonText}>Save</Text>
-              </TouchableOpacity>
+  const renderTaskItem = ({ item: task }: { item: Task }) => (
+    <Swipeable renderRightActions={() => renderRightActions(task)}>
+      <View
+        style={[
+          styles.taskCard,
+          dynamicStyles.card,
+          task.completed && styles.completedTask,
+        ]}
+      >
+        <View style={styles.taskContent}>
+          <TouchableOpacity
+            style={styles.checkboxContainer}
+            onPress={() => toggleTask(task.id)}
+          >
+            <View
+              style={[
+                styles.checkbox,
+                dynamicStyles.borderColor,
+                task.completed && styles.checkboxCompleted,
+              ]}
+            >
+              {task.completed && <Text style={styles.checkmark}>✓</Text>}
             </View>
-          </View>
-        </View>
-      </Modal>
-
-      {/* Modal for Managing Lists */}
-      <Modal
-        animationType="slide"
-        transparent={true}
-        visible={listModalVisible}
-        onRequestClose={() => setListModalVisible(false)}>
-        <View style={styles.modalContainer}>
-          <View style={styles.modalView}>
-            <Text style={styles.modalTitle}>Manage Timetables</Text>
-            <FlatList
-              data={lists}
-              keyExtractor={item => item.id}
-              renderItem={({item}) => (
-                <View style={styles.listItem}>
-                  <TouchableOpacity
-                    style={{flex: 1}}
-                    onPress={() => {
-                      setActiveListId(item.id);
-                      setListModalVisible(false);
-                    }}>
-                    <Text style={styles.listName}>{item.name}</Text>
-                  </TouchableOpacity>
-                  <TouchableOpacity onPress={() => handleDeleteList(item.id)}>
-                    <Text style={styles.deleteText}>Remove</Text>
-                  </TouchableOpacity>
+          </TouchableOpacity>
+          <View style={styles.taskDetails}>
+            <Text
+              style={[
+                styles.taskTitle,
+                dynamicStyles.text,
+                task.completed && styles.completedText,
+              ]}
+            >
+              {task.title}
+            </Text>
+            {task.description && (
+              <Text
+                style={[
+                  styles.taskDescription,
+                  dynamicStyles.subtleText,
+                  task.completed && styles.completedText,
+                ]}
+              >
+                {task.description}
+              </Text>
+            )}
+            <View style={styles.taskMeta}>
+              {task.dueDate && (
+                <View style={styles.metaItem}>
+                  <Text style={[styles.metaText, dynamicStyles.subtleText]}>
+                    📅 {formatDate(task.dueDate)}
+                  </Text>
+                  {task.dueTime && (
+                    <Text style={[styles.metaText, dynamicStyles.subtleText]}>
+                      {' '}
+                      {task.dueTime}
+                    </Text>
+                  )}
                 </View>
               )}
-            />
-            <TextInput
-              style={styles.input}
-              placeholder="New list name..."
-              placeholderTextColor="#999"
-              value={newListName}
-              onChangeText={setNewListName}
-            />
-            <TouchableOpacity
-              style={[styles.button, styles.addButton]}
-              onPress={handleAddList}>
-              <Text style={styles.buttonText}>+ Create New List</Text>
-            </TouchableOpacity>
+              {task.project !== 'inbox' && (
+                <View style={styles.metaItem}>
+                  <View
+                    style={[
+                      styles.projectDot,
+                      { backgroundColor: getProjectColor(task.project) },
+                    ]}
+                  />
+                  <Text style={[styles.metaText, dynamicStyles.subtleText]}>
+                    {projects.find(p => p.id === task.project)?.name}
+                  </Text>
+                </View>
+              )}
+              {task.priority !== 'low' && (
+                <View style={styles.priorityFlag}>
+                  <Text
+                    style={[
+                      styles.priorityText,
+                      { color: getPriorityColor(task.priority) },
+                    ]}
+                  >
+                    🚩 {task.priority.toUpperCase()}
+                  </Text>
+                </View>
+              )}
+            </View>
           </View>
-        </View>
-      </Modal>
-
-      <View style={styles.header}>
-        <Text style={styles.title}>{activeList?.name || 'No List Selected'}</Text>
-        <TouchableOpacity onPress={() => setListModalVisible(true)}>
-          <Text style={styles.manageButton}>Manage Lists</Text>
-        </TouchableOpacity>
-      </View>
-
-      <FlatList
-        data={activeList?.tasks || []}
-        renderItem={renderTaskItem}
-        keyExtractor={item => item.id}
-        contentContainerStyle={styles.list}
-        ListFooterComponent={
           <TouchableOpacity
-            style={[styles.button, styles.addButton]}
-            onPress={handleAddTask}>
-            <Text style={styles.buttonText}>+ Add New Task</Text>
+            style={styles.deleteButton}
+            onPress={() => deleteTask(task.id)}
+          >
+            <Text style={styles.deleteText}>🗑️</Text>
           </TouchableOpacity>
-        }
-        ListEmptyComponent={
-          <View style={styles.emptyComponent}>
-            <Text style={styles.emptyText}>This list is empty.</Text>
-            <Text style={styles.emptyText}>Add a new task to get started!</Text>
-          </View>
-        }
-      />
-
-      <View style={styles.buttonContainer}>
-        <TouchableOpacity
-          style={[styles.button, styles.scheduleButton]}
-          onPress={scheduleAllNotifications}>
-          <Text style={styles.buttonText}>Schedule Reminders for This List</Text>
-        </TouchableOpacity>
+        </View>
       </View>
-    </SafeAreaView>
+    </Swipeable>
+  );
+
+  const renderProjectItem = ({ item: project }: { item: Project }) => (
+    <TouchableOpacity
+      style={[
+        styles.projectItem,
+        activeProject === project.id && styles.activeProjectItem,
+      ]}
+      onPress={() => {
+        setActiveProject(project.id);
+        setShowSidebar(false);
+      }}
+    >
+      <View style={[styles.projectDot, { backgroundColor: project.color }]} />
+      <Text
+        style={[
+          styles.projectName,
+          dynamicStyles.text,
+          activeProject === project.id && styles.activeProjectName,
+        ]}
+      >
+        {project.name}
+      </Text>
+      <Text style={[styles.taskCount, dynamicStyles.subtleText]}>
+        {tasks.filter(t => t.project === project.id && !t.completed).length}
+      </Text>
+    </TouchableOpacity>
+  );
+
+  return (
+    <GestureHandlerRootView style={{ flex: 1 }}>
+      <SafeAreaView style={[styles.container, dynamicStyles.container]}>
+        <StatusBar barStyle="light-content" backgroundColor={COLORS.primary} />
+
+        {/* Header */}
+        <View style={[styles.header, dynamicStyles.header]}>
+          <TouchableOpacity
+            style={styles.menuButton}
+            onPress={() => setShowSidebar(true)}
+          >
+            <Text style={styles.menuIcon}>☰</Text>
+          </TouchableOpacity>
+          <Text style={[styles.headerTitle, dynamicStyles.headerTitle]}>
+            {projects.find(p => p.id === activeProject)?.name || 'Inbox'}
+          </Text>
+          <TouchableOpacity
+            style={styles.addButton}
+            onPress={() => setShowAddTask(true)}
+          >
+            <Text style={styles.addButtonText}>+</Text>
+          </TouchableOpacity>
+        </View>
+
+        {/* Search Bar */}
+        <View style={styles.searchContainer}>
+          <TextInput
+            style={[styles.searchInput, dynamicStyles.input]}
+            placeholder="Search tasks..."
+            placeholderTextColor={isDark ? '#9ca3af' : '#6b7280'}
+            value={searchQuery}
+            onChangeText={setSearchQuery}
+          />
+        </View>
+
+        {/* Task List */}
+        <FlatList
+          data={[...pendingTasks, ...completedTasks]}
+          renderItem={renderTaskItem}
+          keyExtractor={item => item.id}
+          style={styles.taskList}
+          ListEmptyComponent={
+            <View style={styles.emptyState}>
+              <Text style={[styles.emptyTitle, dynamicStyles.text]}>
+                All done! 🎉
+              </Text>
+              <Text style={[styles.emptySubtitle, dynamicStyles.subtleText]}>
+                No tasks here. Add a new task to get started.
+              </Text>
+            </View>
+          }
+        />
+
+        {/* Sidebar Modal */}
+        <Modal
+          visible={showSidebar}
+          animationType="slide"
+          transparent={true}
+          onRequestClose={() => setShowSidebar(false)}
+        >
+          <View style={styles.sidebarOverlay}>
+            <View style={[styles.sidebar, dynamicStyles.card]}>
+              <View style={[styles.sidebarHeader, dynamicStyles.borderColor]}>
+                <Text style={[styles.appTitle, dynamicStyles.text]}>
+                  📋 Todoist
+                </Text>
+                <TouchableOpacity
+                  style={styles.closeButton}
+                  onPress={() => setShowSidebar(false)}
+                >
+                  <Text
+                    style={[styles.closeButtonText, dynamicStyles.subtleText]}
+                  >
+                    ✕
+                  </Text>
+                </TouchableOpacity>
+              </View>
+              <FlatList
+                data={projects}
+                renderItem={renderProjectItem}
+                keyExtractor={item => item.id}
+                style={styles.projectList}
+              />
+            </View>
+          </View>
+        </Modal>
+
+        {/* Add Task Modal */}
+        <Modal
+          visible={showAddTask}
+          animationType="slide"
+          transparent={true}
+          onRequestClose={() => setShowAddTask(false)}
+        >
+          <View style={styles.modalOverlay}>
+            <View style={[styles.modal, dynamicStyles.modal]}>
+              <View style={[styles.modalHeader, dynamicStyles.borderColor]}>
+                <Text style={[styles.modalTitle, dynamicStyles.text]}>
+                  Add New Task
+                </Text>
+              </View>
+              <ScrollView style={styles.modalContent}>
+                <TextInput
+                  style={[styles.input, dynamicStyles.input]}
+                  placeholder="Task title"
+                  placeholderTextColor={isDark ? '#9ca3af' : '#6b7280'}
+                  value={newTask.title}
+                  onChangeText={text =>
+                    setNewTask(prev => ({ ...prev, title: text }))
+                  }
+                  autoFocus
+                />
+                <TextInput
+                  style={[styles.input, styles.textArea, dynamicStyles.input]}
+                  placeholder="Description (optional)"
+                  placeholderTextColor={isDark ? '#9ca3af' : '#6b7280'}
+                  value={newTask.description}
+                  onChangeText={text =>
+                    setNewTask(prev => ({ ...prev, description: text }))
+                  }
+                  multiline
+                />
+                <View style={styles.inputRow}>
+                  <TextInput
+                    style={[
+                      styles.input,
+                      styles.dateInput,
+                      dynamicStyles.input,
+                    ]}
+                    placeholder="YYYY-MM-DD"
+                    placeholderTextColor={isDark ? '#9ca3af' : '#6b7280'}
+                    value={newTask.dueDate}
+                    onChangeText={text =>
+                      setNewTask(prev => ({ ...prev, dueDate: text }))
+                    }
+                  />
+                  <TextInput
+                    style={[
+                      styles.input,
+                      styles.timeInput,
+                      dynamicStyles.input,
+                    ]}
+                    placeholder="HH:MM"
+                    placeholderTextColor={isDark ? '#9ca3af' : '#6b7280'}
+                    value={newTask.dueTime}
+                    onChangeText={text =>
+                      setNewTask(prev => ({ ...prev, dueTime: text }))
+                    }
+                  />
+                </View>
+                <View style={styles.priorityContainer}>
+                  {(['low', 'medium', 'high'] as const).map(priority => (
+                    <TouchableOpacity
+                      key={priority}
+                      style={[
+                        styles.priorityButton,
+                        dynamicStyles.borderColor,
+                        newTask.priority === priority &&
+                          styles.priorityButtonActive,
+                      ]}
+                      onPress={() =>
+                        setNewTask(prev => ({ ...prev, priority }))
+                      }
+                    >
+                      <Text
+                        style={[
+                          styles.priorityButtonText,
+                          dynamicStyles.subtleText,
+                          newTask.priority === priority &&
+                            styles.priorityButtonTextActive,
+                        ]}
+                      >
+                        {priority.toUpperCase()}
+                      </Text>
+                    </TouchableOpacity>
+                  ))}
+                </View>
+              </ScrollView>
+              <View style={[styles.modalActions, dynamicStyles.borderColor]}>
+                <TouchableOpacity
+                  style={[styles.cancelButton, dynamicStyles.borderColor]}
+                  onPress={() => {
+                    setShowAddTask(false);
+                    resetNewTask();
+                  }}
+                >
+                  <Text
+                    style={[styles.cancelButtonText, dynamicStyles.subtleText]}
+                  >
+                    Cancel
+                  </Text>
+                </TouchableOpacity>
+                <TouchableOpacity style={styles.saveButton} onPress={addTask}>
+                  <Text style={styles.saveButtonText}>Add Task</Text>
+                </TouchableOpacity>
+              </View>
+            </View>
+          </View>
+        </Modal>
+      </SafeAreaView>
+    </GestureHandlerRootView>
   );
 };
 
-// --- Styles ---
 const styles = StyleSheet.create({
-  container: {flex: 1, backgroundColor: '#1a202c'},
-  header: {
-    paddingVertical: 15,
-    paddingHorizontal: 20,
-    alignItems: 'center',
-    borderBottomWidth: 1,
-    borderBottomColor: '#2d3748',
-  },
-  title: {fontSize: 24, fontWeight: 'bold', color: '#e2e8f0'},
-  manageButton: {color: '#4299e1', fontSize: 16, marginTop: 5},
-  list: {padding: 16},
-  itemContainer: {
-    flexDirection: 'row',
-    backgroundColor: '#2d3748',
-    borderRadius: 12,
-    padding: 16,
-    marginVertical: 8,
-    alignItems: 'center',
-  },
-  timeContainer: {width: 100},
-  timeText: {fontSize: 16, fontWeight: 'bold', color: '#a0aec0'},
-  taskContainer: {flex: 1},
-  taskText: {fontSize: 16, color: '#e2e8f0'},
-  itemActions: {flexDirection: 'column', alignItems: 'flex-end'},
-  actionText: {color: '#4299e1', marginLeft: 10, paddingVertical: 4},
-  deleteText: {color: '#c53030'},
-  buttonContainer: {padding: 16, borderTopWidth: 1, borderTopColor: '#2d3748'},
-  button: {
-    paddingVertical: 12,
-    paddingHorizontal: 24,
-    borderRadius: 25,
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  addButton: {backgroundColor: '#4a5568', marginTop: 10},
-  scheduleButton: {backgroundColor: '#38a169'},
-  cancelButton: {backgroundColor: '#718096'},
-  buttonText: {color: 'white', fontSize: 16, fontWeight: 'bold'},
-  modalContainer: {
+  container: {
     flex: 1,
-    justifyContent: 'center',
-    alignItems: 'center',
-    backgroundColor: 'rgba(0, 0, 0, 0.6)',
   },
-  modalView: {
-    width: '90%',
-    maxHeight: '80%',
-    backgroundColor: '#2d3748',
-    borderRadius: 20,
-    padding: 25,
+  header: {
+    flexDirection: 'row',
     alignItems: 'center',
+    justifyContent: 'space-between',
+    paddingHorizontal: 20,
+    paddingVertical: 15,
   },
-  modalTitle: {
+  menuButton: {
+    padding: 8,
+  },
+  menuIcon: {
+    fontSize: 20,
+    color: '#ffffff',
+  },
+  headerTitle: {
     fontSize: 20,
     fontWeight: 'bold',
-    color: '#e2e8f0',
-    marginBottom: 20,
   },
-  input: {
-    width: '100%',
-    backgroundColor: '#1a202c',
-    borderRadius: 10,
-    padding: 15,
-    marginBottom: 15,
-    color: '#e2e8f0',
-    fontSize: 16,
-  },
-  modalButtons: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    width: '100%',
-    marginTop: 10,
-  },
-  emptyComponent: {
-    padding: 40,
+  addButton: {
+    backgroundColor: 'rgba(255, 255, 255, 0.2)',
+    borderRadius: 20,
+    width: 40,
+    height: 40,
     alignItems: 'center',
     justifyContent: 'center',
   },
-  emptyText: {color: '#a0aec0', fontSize: 16, textAlign: 'center'},
-  // List Management Modal Styles
-  listItem: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-    paddingVertical: 15,
-    borderBottomWidth: 1,
-    borderBottomColor: '#4a5568',
-    width: '100%',
+  addButtonText: {
+    fontSize: 24,
+    color: '#ffffff',
+    fontWeight: 'bold',
   },
-  listName: {color: '#e2e8f0', fontSize: 18},
+  searchContainer: {
+    padding: 16,
+  },
+  searchInput: {
+    borderRadius: 8,
+    paddingHorizontal: 16,
+    paddingVertical: 12,
+    fontSize: 16,
+    borderWidth: 1,
+  },
+  taskList: {
+    flex: 1,
+    paddingHorizontal: 16,
+  },
+  taskCard: {
+    borderRadius: 12,
+    marginVertical: 4,
+  },
+  completedTask: {
+    opacity: 0.6,
+  },
+  taskContent: {
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+    padding: 16,
+  },
+  checkboxContainer: {
+    marginRight: 12,
+    marginTop: 2,
+  },
+  checkbox: {
+    width: 24,
+    height: 24,
+    borderRadius: 12,
+    borderWidth: 2,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  checkboxCompleted: {
+    backgroundColor: '#22c55e',
+    borderColor: '#22c55e',
+  },
+  checkmark: {
+    color: '#ffffff',
+    fontSize: 12,
+    fontWeight: 'bold',
+  },
+  taskDetails: {
+    flex: 1,
+  },
+  taskTitle: {
+    fontSize: 16,
+    fontWeight: '600',
+    marginBottom: 4,
+  },
+  taskDescription: {
+    fontSize: 14,
+    marginBottom: 8,
+    lineHeight: 20,
+  },
+  completedText: {
+    textDecorationLine: 'line-through',
+  },
+  taskMeta: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    alignItems: 'center',
+    gap: 12,
+  },
+  metaItem: {
+    flexDirection: 'row',
+    alignItems: 'center',
+  },
+  metaText: {
+    fontSize: 12,
+  },
+  projectDot: {
+    width: 8,
+    height: 8,
+    borderRadius: 4,
+    marginRight: 4,
+  },
+  priorityFlag: {
+    marginLeft: 'auto',
+  },
+  priorityText: {
+    fontSize: 10,
+    fontWeight: 'bold',
+  },
+  deleteButton: {
+    padding: 8,
+    marginLeft: 8,
+  },
+  deleteText: {
+    fontSize: 16,
+  },
+  emptyState: {
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingVertical: 60,
+  },
+  emptyTitle: {
+    fontSize: 20,
+    fontWeight: 'bold',
+    marginBottom: 8,
+  },
+  emptySubtitle: {
+    fontSize: 16,
+    textAlign: 'center',
+  },
+  sidebarOverlay: {
+    flex: 1,
+    backgroundColor: 'rgba(0, 0, 0, 0.5)',
+  },
+  sidebar: {
+    width: width * 0.8,
+    height: '100%',
+    paddingTop: Platform.OS === 'ios' ? 60 : 40,
+  },
+  sidebarHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    paddingHorizontal: 20,
+    paddingBottom: 20,
+    borderBottomWidth: 1,
+  },
+  appTitle: {
+    fontSize: 20,
+    fontWeight: 'bold',
+  },
+  closeButton: {
+    padding: 8,
+  },
+  closeButtonText: {
+    fontSize: 18,
+  },
+  projectList: {
+    flex: 1,
+    paddingTop: 20,
+  },
+  projectItem: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingHorizontal: 20,
+    paddingVertical: 16,
+  },
+  activeProjectItem: {
+    backgroundColor: '#fef2f2',
+  },
+  projectName: {
+    flex: 1,
+    fontSize: 16,
+    marginLeft: 12,
+  },
+  activeProjectName: {
+    color: COLORS.primary,
+    fontWeight: '600',
+  },
+  taskCount: {
+    fontSize: 14,
+    backgroundColor: '#f3f4f6',
+    paddingHorizontal: 8,
+    paddingVertical: 2,
+    borderRadius: 10,
+    minWidth: 24,
+    textAlign: 'center',
+  },
+  modalOverlay: {
+    flex: 1,
+    backgroundColor: 'rgba(0, 0, 0, 0.5)',
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  modal: {
+    width: width * 0.9,
+    maxHeight: height * 0.8,
+    borderRadius: 16,
+    overflow: 'hidden',
+  },
+  modalHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    padding: 20,
+    borderBottomWidth: 1,
+  },
+  modalTitle: {
+    fontSize: 18,
+    fontWeight: 'bold',
+  },
+  modalContent: {
+    padding: 20,
+  },
+  input: {
+    borderRadius: 8,
+    paddingHorizontal: 16,
+    paddingVertical: 12,
+    fontSize: 16,
+    borderWidth: 1,
+    marginBottom: 16,
+  },
+  textArea: {
+    height: 80,
+    textAlignVertical: 'top',
+  },
+  inputRow: {
+    flexDirection: 'row',
+    gap: 12,
+  },
+  dateInput: {
+    flex: 1,
+  },
+  timeInput: {
+    flex: 1,
+  },
+  priorityContainer: {
+    flexDirection: 'row',
+    gap: 8,
+    marginBottom: 16,
+  },
+  priorityButton: {
+    flex: 1,
+    paddingVertical: 12,
+    borderRadius: 8,
+    borderWidth: 1,
+    alignItems: 'center',
+  },
+  priorityButtonActive: {
+    backgroundColor: COLORS.primary,
+    borderColor: COLORS.primary,
+  },
+  priorityButtonText: {
+    fontSize: 12,
+    fontWeight: '600',
+  },
+  priorityButtonTextActive: {
+    color: '#ffffff',
+  },
+  modalActions: {
+    flexDirection: 'row',
+    padding: 20,
+    gap: 12,
+    borderTopWidth: 1,
+  },
+  cancelButton: {
+    flex: 1,
+    paddingVertical: 14,
+    borderRadius: 8,
+    borderWidth: 1,
+    alignItems: 'center',
+  },
+  cancelButtonText: {
+    fontSize: 16,
+    fontWeight: '600',
+  },
+  saveButton: {
+    flex: 1,
+    paddingVertical: 14,
+    borderRadius: 8,
+    backgroundColor: COLORS.primary,
+    alignItems: 'center',
+  },
+  saveButtonText: {
+    fontSize: 16,
+    fontWeight: '600',
+    color: '#ffffff',
+  },
+  swipeAction: {
+    backgroundColor: '#22c55e',
+    justifyContent: 'center',
+    alignItems: 'center',
+    width: 100,
+    height: '100%',
+  },
+  swipeActionText: {
+    color: 'white',
+    fontWeight: '600',
+    padding: 20,
+  },
 });
 
-export default App;
+export default TaskManager;
